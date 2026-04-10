@@ -25,6 +25,10 @@ local remarks = server.alias or ""
 local b64decode = nixio.bin.b64decode
 local b64encode = nixio.bin.b64encode
 
+if server.type == "ss-rust" or server.type == "ss-libev" then
+    server.type = "ss"
+end
+
 -- base64 解码
 local function base64Decode(text)
 	local raw = text
@@ -59,6 +63,19 @@ local function base64Encode(text)
 	else
 		return text
 	end
+end
+
+-- Hex 编码
+local function hexEncode(text)
+	if not text or text == "" then
+		return ''
+	end
+	local hex = ''
+	for i = 1, #text do
+		local byte = string.byte(text, i)
+		hex = hex .. string.format('%02X', byte)
+	end
+	return hex
 end
 
 local function cleanEmptyTables(t)
@@ -514,6 +531,18 @@ end
 							udpHop = (server.flag_port_hopping == "1") and {
 								ports = string.gsub(server.port_range, ":", "-"),
 								interval = (function(v)
+									if not v then return 30 end
+									if v:find("-", 1, true) then
+										local min, max = v:match("^(%d+)%-(%d+)$")
+										min = tonumber(min)
+										max = tonumber(max)
+										if min and max then
+											min = (min >= 5) and min or 5
+											max = (max >= min) and max or min
+											return min .. "-" .. max
+										end
+										return 30
+									end
 									v = tonumber((v or "30"):match("^%d+"))
 									return (v and v >= 5) and v or 30
 								end)(server.hopinterval)
@@ -562,7 +591,7 @@ end
 										{
 											rand = (n_type == "rand") and (n_packet and (type(n_packet) == "string" and (n_packet:find("-")) and n_packet or tonumber(n_packet))) or nil,
 											type = (type(n_type) == "string" and n_type ~= "rand") and n_type or nil,
-											packet = (n_type ~= "rand") and (n_type ~= "str" and (n_packet and type(n_packet) == "string" and base64Encode(n_packet)) or n_packet) or nil,
+											packet = (n_type ~= "rand") and ((n_packet and type(n_packet) == "string") and ((n_type == "hex" and hexEncode(n_packet)) or (n_type == "base64" and base64Encode(n_packet))) or n_packet) or nil,
 											delay = (type(n_delay) == "string" and string.find(n_delay, "-")) and n_delay or (n_delay and tonumber(n_delay))
 										}
 									}
@@ -723,12 +752,30 @@ local hysteria2 = {
 		listen = "0.0.0.0:" .. tonumber(socks_port),
 		disableUDP = false
 	} or nil,
-	transport = server.transport_protocol and {
+	transport = {
 		type = server.transport_protocol or "udp",
-		udp = (server.port_range and (server.hopinterval) and {
-			hopInterval = (server.port_range and (tonumber(server.hopinterval) .. "s") or nil)
-		} or nil)
-	} or nil,
+		udp = server.port_range and (function()
+			local udp = {}
+			local t = server.hopinterval
+			if not t then return nil end
+			if t:find("-", 1, true) then
+				local min, max = t:match("^(%d+)%-(%d+)$")
+				min = tonumber(min)
+				max = tonumber(max)
+				if min and max then
+					min = (min >= 5) and min or 5
+					max = (max >= min) and max or min
+					udp.minHopInterval = min .. "s"
+					udp.maxHopInterval = max .. "s"
+					return udp
+				end
+			end
+			t = tonumber((t or "30"):match("^%d+"))
+			t = (t and t >= 5) and t or 30
+			udp.hopInterval = t .. "s"
+			return udp
+		end)() or nil
+	},
 --[[
 	tcpTProxy = (proto:find("tcp") and local_port ~= "0") and {
 		listen = "0.0.0.0:" .. tonumber(local_port)
