@@ -449,13 +449,12 @@ Xray.outbounds = {
 			} or nil,
 			kcpSettings = (server.transport == "kcp") and {
 				-- kcp
-				mtu = tonumber(server.mtu),
-				tti = tonumber(server.tti),
-				uplinkCapacity = tonumber(server.uplink_capacity),
-				downlinkCapacity = tonumber(server.downlink_capacity),
-				congestion = (server.congestion == "1") and true or false,
-				readBufferSize = tonumber(server.read_buffer_size),
-				writeBufferSize = tonumber(server.write_buffer_size)
+				mtu =  (server.mtu and server.mtu ~= "") and tonumber(server.mtu) or 1350,
+				tti = 50,
+				uplinkCapacity = 12,
+				downlinkCapacity = 100,
+				CwndMultiplier = 1,
+				MaxSendingWindow = 2 * 1024 * 1024
 			} or nil,
 			wsSettings = (server.transport == "ws") and (server.ws_path or server.ws_host or server.tls_host) and {
 				-- ws
@@ -693,9 +692,9 @@ if xray_fragment.fragment ~= "0" or (xray_fragment.noise ~= "0" and xray_noise.e
 	table.insert(Xray.outbounds, {
 		protocol = "freedom",
 		tag = (remarks ~= nil and remarks ~= "") and (node_id .. "." .. remarks) or node_id,
-		settings = {
-			domainStrategy = (xray_fragment.noise == "1" and xray_noise.enabled == "1") and n_domainstrategy or nil
-		},
+		settings = (xray_fragment.noise == "1" and xray_noise.enabled == "1") and n_domainstrategy and n_domainstrategy ~= "" and {
+			domainStrategy = n_domainstrategy
+		} or nil,
 		streamSettings = {
 			sockopt = {
 			mark = 255,
