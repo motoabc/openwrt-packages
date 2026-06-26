@@ -50,32 +50,32 @@ local b64encode = nixio.bin.b64encode
 local effective_node_local_port = tonumber(server.local_port) or tonumber(default_node_local_port) or 1234
 
 if server.type == "ss-rust" then
-    server.type = "ss"
+	server.type = "ss"
 end
 
 local function parse_realm_uri(uri)
 	if type(uri) ~= "string" then return nil end
-	-- realm://token@server/realm_id?query
-	local token, server_url, realm_id, query = trim(uri):match("^realm://([^@]+)@([^/]+)/([^?]*)%??(.*)$")
-	if not token or not server_url or not realm_id then return nil end
+	-- realm[+http]://token@server/realm_id?query
+	local scheme, token, server_url, realm_id, query = trim(uri):match("^(realm%+http|realm)://([^@]+)@([^/]+)/([^?]*)%??(.*)$")
+	if not scheme or not token or not server_url or not realm_id then return nil end
 	realm_id = realm_id:gsub("/+$", "")
+	local address, port = server_url:match("^%[?([^%]]+)%]?:?(%d*)$")
+	port = tonumber(port) or (scheme == "realm+http" and 80 or 443)
 	local realm = {
+		scheme = scheme,
 		token = token,
 		server_url = server_url,
+		address = address,
+		port = port,
 		realm_id = realm_id
 	}
 	-- 解析 query 中的 stun=
-	if query and query ~= "" then
-		local stun_servers = {}
-		for key, value in query:gmatch("([^&=?]+)=([^&]+)") do
-			if key == "stun" and value ~= "" then
-				stun_servers[#stun_servers + 1] = value
-			end
-		end
-		if #stun_servers > 0 then
-			realm.stun_servers = stun_servers
-		end
+	local stun_servers
+	for value in (query or ""):gmatch("[?&]?[Ss][Tt][Uu][Nn]=([^&]+)") do
+		if not stun_servers then stun_servers = {} end
+		stun_servers[#stun_servers + 1] = value
 	end
+	realm.stun_servers = stun_servers
 	return realm
 end
 
@@ -296,6 +296,15 @@ function xray_hysteria2()
 		address = server.server,
 		port = tonumber(server.server_port)
 	}
+
+	-- Realm 支持：使用 Realm 服务器地址覆盖默认地址
+	if server.v2ray_protocol == "hysteria2" and server.hysteria2_realms then
+		local realm = parse_realm_uri(server.hysteria2_realm_url)
+		if realm then
+			outbound_settings.address = realm.address
+			outbound_settings.port = realm.port
+		end
+	end
 end
 local outbound = {}
 function outbound:new(o)
@@ -428,22 +437,24 @@ end
 	-- 开启 socks 代理
 	-- 检查是否启用 socks 代理
 if proto and proto:find("tcp") and socks_port ~= "0" then
-    table.insert(Xray.inbounds, {
-        -- socks
-        protocol = "socks",
-        port = tonumber(socks_port),
+	local auth = (socks_server.socks5_auth and socks_server.socks5_auth ~= "noauth")
+		and {{
+			user = socks_server.socks5_user,
+			pass = socks_server.socks5_pass
+		}} or nil
+
+	table.insert(Xray.inbounds, {
+		-- socks
+		protocol = "socks",
+		port = tonumber(socks_port),
 		settings = {
 			auth = socks_server.socks5_auth or "noauth",
 			udp = true,
-			mixed = ((socks_server.socks5_mixed == '1') and true or false) or nil,
-			accounts = (socks_server.socks5_auth and socks_server.socks5_auth ~= "noauth") and {
-				{
-					user = socks_server.socks5_user,
-					pass = socks_server.socks5_pass
-				}
-			} or nil
-		} or nil
-    })
+			mixed = socks_server.socks5_mixed == "1" or nil,
+			accounts = (xray_version_val <= 260503) and auth or nil,
+			users = (xray_version_val > 260503) and auth or nil
+		}
+	})
 end
 
 -- 传出连接
@@ -648,9 +659,7 @@ Xray.outbounds = {
 						local realm = parse_realm_uri(server.hysteria2_realm_url)
 						local url, stun
 						if realm then
-							if realm.token and realm.server_url and realm.realm_id then
-								url = "realm://" .. realm.token .. "@" .. realm.server_url .. "/" .. realm.realm_id
-							end
+							url = realm.scheme .. "://" .. realm.token .. "@" .. realm.server_url .. "/" .. realm.realm_id
 							stun = realm.stun_servers or server.hysteria2_realm_stun
 						end
 						local r = {
@@ -707,15 +716,56 @@ Xray.outbounds = {
 					local n_maxsplit = xray_fragment.fragment_maxSplit
 					--local domainstr = xray_noise.domainStrategy
 					finalmask.tcp = finalmask.tcp or {}
+
+					-- 辅助函数：将逗号分隔的字符串拆分为数组
+					local function split_to_array(str)
+						if not str or str == "" then return nil end
+						local result = {}
+						for value in string.gmatch(str, "[^,]+") do
+							value = value:gsub("^%s*(.-)%s*$", "%1")  -- 去除首尾空格
+							if value ~= "" then
+								table.insert(result, value)
+							end
+						end
+						return #result > 0 and result or nil
+					end
+
+					-- 构建 fragment settings
+					local fragment_settings = {
+						packets = (n_packets and n_packets ~= "") and n_packets or nil,
+						maxSplit = (n_maxsplit and n_maxsplit ~= "") and n_maxsplit or nil
+					}
+    
+					-- 根据 Xray 版本决定使用旧格式还是新格式
+					if xray_version_val <= 260601 then
+						-- 旧版本：使用 length 和 delay（单个值）
+						if n_length and n_length ~= "" then
+							fragment_settings.length = n_length
+						end
+						if n_delay and n_delay ~= "" then
+							if type(n_delay) == "string" and n_delay:find("-", 1, true) then
+								fragment_settings.delay = n_delay
+							else
+								fragment_settings.delay = tonumber(n_delay)
+							end
+						end
+					else
+						-- 新版本：使用 lengths 和 delays（数组）
+						-- 拆分逗号分隔的字符串
+						local lengths_array = split_to_array(n_length)
+						if lengths_array then
+							fragment_settings.lengths = lengths_array
+						end
+        
+						local delays_array = split_to_array(n_delay)
+						if delays_array then
+							fragment_settings.delays = delays_array
+						end
+					end
+    
 					finalmask.tcp[#finalmask.tcp + 1] = {
 						type = "fragment",
-						settings = {
-							--domainStrategy = (xray_fragment.noise == "1" and xray_noise.enabled == "1") and domainstr or nil,
-							packets = (n_packets and n_packets ~= "") and n_packets or nil,
-							length = (n_length and n_length ~= "") and n_length or nil,
-							delay = (type(n_delay) == "string" and string.find(n_delay, "-")) and n_delay or (n_delay and tonumber(n_delay)),
-							maxSplit = (n_maxsplit and n_maxsplit ~= "") and n_maxsplit or nil
-						}
+						settings = fragment_settings
 					}
 				end
 				if xray_fragment.noise == "1" and (TP == "kcp" or (TP == "xhttp" and (server.tls_alpn == "h3" or server.tls_alpn == "h3,h2"))) then 
